@@ -3,80 +3,94 @@
 
 clear
 
-# Fichier de log:
+# Fichier de log
 log_file="/tmp/ffmpeg_execution.log"
-> "$log_file" # Vider le fichier log a chaque debut du script.
-function logtofile
+> "$log_file"
+
+logtofile()
 {
-	local message="$1";
-	echo -e "$(date +"[%d %B %T]") $message" | tee -a "$log_file";
+    local message="$1"
+    printf '[%s] %s\n' "$(date '+%d %B %T')" "$message" | tee -a "$log_file"
 }
 
 logtofile "SCRIPT DE CONVERSION DU CODEC AUDIO EAC3"
-logtofile "fichier de log: \"$log_file\""
+logtofile "Fichier de log : \"$log_file\""
 
 # Vérifier si FFmpeg et FFprobe sont installés
-if ! command -v ffmpeg &> /dev/null || ! command -v ffprobe &> /dev/null
-then
-	logtofile "ERREUR : FFmpeg et/ou FFprobe ne sont pas installés ou ne sont pas dans le PATH."
+if ! command -v ffmpeg >/dev/null 2>&1 ||
+   ! command -v ffprobe >/dev/null 2>&1; then
+    logtofile "ERREUR : FFmpeg et/ou FFprobe ne sont pas installés ou absents du PATH."
     exit 1
 fi
 
-logtofile "FFmpeg et/ou FFprobe sont bien installés."
+logtofile "FFmpeg et FFprobe sont bien installés."
 
-# Vérifier si un fichier vidéo a été fourni en argument
+# Vérifier si un fichier vidéo a été fourni
 if [ -z "$1" ]; then
-	logtofile "Pas de fichier passer en argument."
+    logtofile "Aucun fichier passé en argument."
     logtofile "Usage : $0 <chemin_vers_le_fichier_video> [repertoire_de_sortie]"
     exit 1
 fi
 
-# Configuration Section:
-
+# Configuration
 ffmpeg="ffmpeg"
 logtofile "Utilisation de $ffmpeg"
 
-# choix des codec a utiliser:
-codec_video_function="Copy_video"       ; logtofile "codec_video_function: Copy_video";
-codec_audio_function="transcode_eac3"   ; logtofile "codec_audio_function: transcode_eac3"
-codec_subtitle_function="copy_subtitle" ; logtofile "codec_subtitle_function: copy_subtitle"
+# Choix des fonctions de traitement
+codec_video_function="Copy_video"
+codec_audio_function="transcode_eac3"
+codec_subtitle_function="copy_subtitle"
 
-INPUT_FILE=$(echo "$1" | tr -d '\r\n') # Nettoyer les arguments d'éventuels retours à la ligne ou espaces parasites
-# Extraire le nom de base du fichier sans l'extension
+INPUT_FILE="$1"
+OUTPUT_DIR="${2:-/tmp/converted}"
+
+# Extraire le nom du fichier sans son extension
 FILENAME_BASE=$(basename -- "$INPUT_FILE")
 FILENAME_BASE="${FILENAME_BASE%.*}"
-logtofile "le nom de base du fichier à convertir sans l'extension: \"$FILENAME_BASE\""
 
-# Utiliser le deuxième argument s'il est fourni, sinon /tmp/converted par défaut
-OUTPUT_DIR=$(echo "${2:-/tmp/converted}" | tr -d '\r\n') # Nettoyer les arguments d'éventuels retours à la ligne ou espaces parasites
+# Vérifier le fichier source
+if [ ! -f "$INPUT_FILE" ]; then
+    logtofile "ERREUR : le fichier source n'existe pas : $INPUT_FILE"
+    exit 1
+fi
 
 # Créer le répertoire de sortie
-mkdir -p "$OUTPUT_DIR"
-logtofile "Repertoire du media converti: \"$OUTPUT_DIR\""
-logtofile "fichier source: \"$INPUT_FILE\""
+if ! mkdir -p -- "$OUTPUT_DIR"; then
+    logtofile "ERREUR : impossible de créer le répertoire de sortie."
+    exit 1
+fi
 
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#
+OUTPUT_FILE="$OUTPUT_DIR/$FILENAME_BASE.mkv"
+
+logtofile "Nom du fichier sans extension : \"$FILENAME_BASE\""
+logtofile "Répertoire de sortie : \"$OUTPUT_DIR\""
+logtofile "Fichier source : \"$INPUT_FILE\""
+logtofile "Fichier de sortie : \"$OUTPUT_FILE\""
+
+# -------------------------------------------------------------------
+# Déterminer si une piste audio utilise le codec E-AC3
+# -------------------------------------------------------------------
 audio_is_eac3()
 {
-    local track_number="$1"  # Numéro de la piste audio (0, 1, etc.)
-    local video_file="$2"    # Chemin vers la vidéo
+    local track_number="$1"
+    local video_file="$2"
+    local codec
 
-    if [ -z "$track_number" ]; then
-        logtofile  "Erreur : Numéro de piste manquante en parametre"
+    if [ -z "$track_number" ] || [ -z "$video_file" ]; then
+        logtofile "ERREUR : paramètres manquants dans audio_is_eac3."
         return 1
     fi
-	
-	if [ -z "$video_file" ]; then
-		logtofile "Erreur dans la fonction audio_is_eac3: fichier vidéo manquant en parametre"
-		return 1
-	fi
 
     if [ ! -f "$video_file" ]; then
-        logtofile   "Erreur : Le fichier '$video_file' n'existe pas"
+        logtofile "ERREUR : fichier vidéo introuvable : $video_file"
         return 1
     fi
 
-    codec=$(ffprobe -v error -select_streams a:"$track_number" -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+    codec=$(ffprobe -v error \
+        -select_streams "a:$track_number" \
+        -show_entries stream=codec_name \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$video_file" 2>/dev/null)
 
     if [ "$codec" = "eac3" ]; then
         echo "yes"
@@ -85,121 +99,225 @@ audio_is_eac3()
     fi
 }
 
-function transcode_eac3
+# -------------------------------------------------------------------
+# Transcoder les pistes E-AC3 en AAC stéréo
+# Copier les autres pistes audio sans transcodage
+# -------------------------------------------------------------------
+transcode_eac3()
 {
-	logtofile " \"transcode_eac3\" function is called"
+    logtofile "Fonction transcode_eac3 appelée."
 
-	local audio_tracks=$(ffprobe -v error -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null | grep -c "audio")
+    local audio_tracks
+    local i
+    local codec_status
 
-	if [ "$audio_tracks" -eq 0 ]; then
-		logtofile "Aucune piste audio détectée dans '$INPUT_FILE'"
-		exit 1
-	fi
+    audio_tracks=$(ffprobe -v error \
+        -show_entries stream=codec_type \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$INPUT_FILE" 2>/dev/null | grep -c "audio")
 
-	logtofile "$audio_tracks pistes audio ont été trouvées."
+    if [ "$audio_tracks" -eq 0 ]; then
+        logtofile "Aucune piste audio détectée dans '$INPUT_FILE'."
+        return 1
+    fi
 
-	audio_map=""
-	audio_cmd=" -ac 2 -ar 48000 "
-	for ((i=0; i<audio_tracks; i++));
-	do
-		audio_map=" $audio_map -map 0:a:$i "
-		
-		if [ "$(audio_is_eac3 "$i" "$INPUT_FILE")" = "yes" ]; then
-			 logtofile "Piste $i : E-AC3 détecté. Conversion en AAC stéréo..."
-			 audio_cmd=" $audio_cmd -c:a:$i aac -b:a 128k "
-		else
-			 logtofile "Piste $i : Non E-AC3. Copie sans transcodage..."
-			 audio_cmd=" $audio_cmd -c:a:$i copy"
-		fi
-	done
-	
-	logtofile "audio_map: $audio_map"
-	logtofile "audio_cmd: $audio_cmd"
+    logtofile "$audio_tracks piste(s) audio détectée(s)."
+
+    # Tableaux Bash contenant les arguments FFmpeg
+    audio_map=()
+    audio_cmd=()
+
+    for ((i=0; i<audio_tracks; i++)); do
+
+        audio_map+=(-map "0:a:$i")
+
+        codec_status=$(audio_is_eac3 "$i" "$INPUT_FILE")
+
+        if [ "$codec_status" = "yes" ]; then
+            logtofile "Piste audio $i : E-AC3 détecté, conversion en AAC stéréo."
+
+            audio_cmd+=(
+                "-c:a:$i" aac
+                "-b:a:$i" 128k
+                "-ac:a:$i" 2
+                "-ar:a:$i" 48000
+            )
+        else
+            logtofile "Piste audio $i : autre codec, copie sans transcodage."
+
+            audio_cmd+=("-c:a:$i" copy)
+        fi
+    done
+
+    logtofile "Nombre de pistes audio configurées : $audio_tracks"
 }
 
-function copy_subtitle
+# -------------------------------------------------------------------
+# Copier les pistes de sous-titres
+# -------------------------------------------------------------------
+copy_subtitle()
 {
-	logtofile "copy_subtitle function is called:"
-	subtitle_tracks=$(ffprobe -v error -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null | grep -c "subtitle")
+    logtofile "Fonction copy_subtitle appelée."
+
+    local subtitle_tracks
+    local i
+
+    subtitle_tracks=$(ffprobe -v error \
+        -show_entries stream=codec_type \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$INPUT_FILE" 2>/dev/null | grep -c "subtitle")
+
+    subtitle_map=()
+    subtitle_cmd=()
 
     if [ "$subtitle_tracks" -eq 0 ]; then
-        logtofile "Aucune piste de sous-titre n'a été détectée dans '$INPUT_FILE'. On continue sans sous-titres."
-        subtitle_map=""
-        subtitle_cmd=""
+        logtofile "Aucune piste de sous-titres détectée."
         return 0
     fi
 
-	logtofile "Nombres de sous-titre : $subtitle_tracks pistes."
+    logtofile "$subtitle_tracks piste(s) de sous-titres détectée(s)."
 
-	subtitle_map=""
-	subtitle_cmd=""
-	for ((i=0; i<subtitle_tracks; i++));
-	do
-		subtitle_map="$subtitle_map -map 0:s:$i"
-		subtitle_cmd="$subtitle_cmd -c:s:$i copy"
-	done
-
-	logtofile "subtitle_cmd: $subtitle_cmd"
+    for ((i=0; i<subtitle_tracks; i++)); do
+        subtitle_map+=(-map "0:s:$i")
+        subtitle_cmd+=("-c:s:$i" copy)
+    done
 }
 
-function HEVC_plus_pad
+# -------------------------------------------------------------------
+# Encoder la vidéo en HEVC avec redimensionnement et padding
+# -------------------------------------------------------------------
+HEVC_plus_pad()
 {
-	logtofile "HEVC_plus_pad is Called"
-	video_cmd=" -c:v libx265 -crf 22 -preset slow -profile:v main -level 4.1 -pix_fmt yuv420p \
-                              -vf \"scale=1280:-2:force_original_aspect_ratio=decrease,pad=1280:720:(1280-iw)/2:(720-ih)/2:black\" \
-                              -x265-params ctu=32:ref=5:bframes=3:b-adapt=2:rc-lookahead=60:vbv-maxrate=10000:vbv-bufsize=10000:qpmax=69:weightp=1:merange=24:chroma-qp-offset=-1:psy-rd=1.0:psy-rdoq=0.15:min-keyint=23 "
+    logtofile "Fonction HEVC_plus_pad appelée."
 
-	video_map=" -map 0:v:0 "
-	logtofile "video parameters: \n $video_cmd"
+    video_cmd=(
+        -c:v libx265
+        -crf 22
+        -preset slow
+        -profile:v main
+        -level:v 4.1
+        -pix_fmt yuv420p
+        -vf "scale=1280:-2:force_original_aspect_ratio=decrease,pad=1280:720:(1280-iw)/2:(720-ih)/2:black"
+        -x265-params "ctu=32:ref=5:bframes=3:b-adapt=2:rc-lookahead=60:vbv-maxrate=10000:vbv-bufsize=10000:qpmax=69:weightp=1:merange=24:chroma-qp-offset=-1:psy-rd=1.0:psy-rdoq=0.15:min-keyint=23"
+    )
+
+    video_map=(-map 0:v:0)
+
+    logtofile "Paramètres vidéo HEVC configurés."
 }
 
-function Copy_video
+# -------------------------------------------------------------------
+# Copier la vidéo sans réencodage
+# -------------------------------------------------------------------
+Copy_video()
 {
-	logtofile "Copy_video function is called"
-	video_cmd=" -c:v copy "
-	video_map=" -map 0:v:0 "
-	logtofile "video parameters: $video_cmd"
+    logtofile "Fonction Copy_video appelée."
+
+    video_cmd=(-c:v copy)
+    video_map=(-map 0:v:0)
+
+    logtofile "Vidéo configurée en copie directe."
 }
 
-##---------------------------------------------------------------------- Encoding Function ---------------------------------------------------------------------------##
-execute_ffmpeg ()
+# -------------------------------------------------------------------
+# Fonction principale d'encodage
+# -------------------------------------------------------------------
+execute_ffmpeg()
 {
-	logtofile "Function: execute_ffmpeg"
-	
-	$codec_video_function
-	$codec_audio_function
-	$codec_subtitle_function
-	
-	ffmpeg_cmd="$ffmpeg -threads 4 -hide_banner -loglevel verbose -i \"$INPUT_FILE\" \
-				$video_map $audio_map $subtitle_map $video_cmd $audio_cmd $subtitle_cmd -movflags +faststart \"$OUTPUT_DIR/$FILENAME_BASE.mkv\""
-	
-	logtofile "ffmpeg_cmd:\n$ffmpeg_cmd"
-	
-	start_time=$(date +%s)
-	start_date=$(date)
-	
-	logtofile "Début de l'encodage à $start_date..."
-	eval "$ffmpeg_cmd"
-	exit_code=$?
-	
-	end_time=$(date +%s)
-	end_date=$(date)
-	
-	duration=$((end_time - start_time))
-	hours=$((duration / 3600))
-	minutes=$(( (duration % 3600) / 60))
-	seconds=$((duration % 60))
-	
-	logtofile "Encodage terminé à $end_date."
-	logtofile "Temps d'exécution : $hours heures, $minutes minutes, $seconds secondes"
+    logtofile "Fonction execute_ffmpeg appelée."
 
-	if [ $exit_code -eq 0 ]; then
-		logtofile "FFmpeg s'est exécuté avec succès."
-	else
-		logtofile "Erreur lors de l'exécution de FFmpeg (code de sortie : $exit_code)."
-	fi
-	
-	exit
+    # Initialiser les tableaux avant la configuration
+    video_map=()
+    video_cmd=()
+    audio_map=()
+    audio_cmd=()
+    subtitle_map=()
+    subtitle_cmd=()
+
+    # Exécuter les fonctions de configuration sélectionnées
+    if ! "$codec_video_function"; then
+        logtofile "ERREUR : configuration vidéo impossible."
+        return 1
+    fi
+
+    if ! "$codec_audio_function"; then
+        logtofile "ERREUR : configuration audio impossible."
+        return 1
+    fi
+
+    if ! "$codec_subtitle_function"; then
+        logtofile "ERREUR : configuration des sous-titres impossible."
+        return 1
+    fi
+
+    # Correction de la première erreur.
+    # Construction de la commande avec un tableau Bash, sans eval.
+    local -a args=(
+        -threads 4
+        -hide_banner
+        -loglevel verbose
+        -i "$INPUT_FILE"
+    )
+
+    args+=("${video_map[@]}")
+    args+=("${audio_map[@]}")
+    args+=("${subtitle_map[@]}")
+
+    args+=("${video_cmd[@]}")
+    args+=("${audio_cmd[@]}")
+    args+=("${subtitle_cmd[@]}")
+
+    # Sortie MKV : ne pas utiliser -movflags +faststart
+    args+=("$OUTPUT_FILE")
+
+    # Journaliser les arguments sans les réinterpréter
+    logtofile "Arguments FFmpeg préparés :"
+
+    local arg
+    for arg in "$ffmpeg" "${args[@]}"; do
+        printf -v arg '%q' "$arg"
+        logtofile "  $arg"
+    done
+
+    local start_time
+    local end_time
+    local start_date
+    local end_date
+    local duration
+    local hours
+    local minutes
+    local seconds
+    local exit_code
+
+    start_time=$(date +%s)
+    start_date=$(date)
+
+    logtofile "Début de l'encodage à $start_date..."
+
+    # Exécution directe : chaque élément du tableau est un argument.
+    "$ffmpeg" "${args[@]}"
+    exit_code=$?
+
+    end_time=$(date +%s)
+    end_date=$(date)
+
+    duration=$((end_time - start_time))
+    hours=$((duration / 3600))
+    minutes=$(((duration % 3600) / 60))
+    seconds=$((duration % 60))
+
+    logtofile "Encodage terminé à $end_date."
+    logtofile "Temps d'exécution : $hours h, $minutes min, $seconds s."
+
+    if [ "$exit_code" -eq 0 ]; then
+        logtofile "FFmpeg s'est exécuté avec succès."
+    else
+        logtofile "ERREUR FFmpeg : code de sortie $exit_code."
+    fi
+
+    return "$exit_code"
 }
 
+# Laisser le script retourner le résultat de FFmpeg
 execute_ffmpeg
+exit $?
