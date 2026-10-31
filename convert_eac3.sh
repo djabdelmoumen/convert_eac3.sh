@@ -3,106 +3,164 @@
 
 clear
 
-# Fichier de log
+# VERSION FINAL
+
+# ---------------
+# Gestion du Log:
+# ---------------
 log_file="/tmp/ffmpeg_execution.log"
 > "$log_file"
-
 logtofile()
 {
-    local message="$1"
-    printf '[%s] %s\n' "$(date '+%d %B %T')" "$message" | tee -a "$log_file"
+	local message="$1"
+	printf '[%s] %s\n' "$(date '+%d %B %T')" "$message" | tee -a "$log_file"
 }
-
-logtofile "SCRIPT DE CONVERSION DU CODEC AUDIO EAC3"
-logtofile "Fichier de log : \"$log_file\""
-
-# Vérifier si FFmpeg et FFprobe sont installés
-if ! command -v ffmpeg >/dev/null 2>&1 ||
-   ! command -v ffprobe >/dev/null 2>&1; then
-    logtofile "ERREUR : FFmpeg et/ou FFprobe ne sont pas installés ou absents du PATH."
+# ---------------
+# CONFIGURATION :
+# ---------------
+CONFIGURATION()
+{
+	logtofile "SCRIPT DE CONVERSION DU CODEC AUDIO E-AC3"
+	logtofile "Fichier de log : \"$log_file\""
+	# ---------------------------------------------
+	# Vérifier si FFmpeg et FFprobe sont installés:
+	# ---------------------------------------------
+	if ! command -v ffmpeg >/dev/null 2>&1 ||
+	   ! command -v ffprobe >/dev/null 2>&1; then
+		logtofile "ERREUR : FFmpeg et/ou FFprobe ne sont pas installés ou absents du PATH."
+		exit 1
+	fi
+	logtofile "FFmpeg et FFprobe sont bien installés."
+	# --------------------------------------
+	# Vérifier Le fichier vidéo à convertir:
+	# --------------------------------------
+	if [ -z "$1" ]; then
+		logtofile "Aucun fichier passé en argument."
+		logtofile "Usage : $0 <chemin_vers_le_fichier_video> [repertoire_de_sortie]"
+		exit 1
+	fi
+	INPUT_FILE="$1"
+	if [[ ! -f "$INPUT_FILE" || ! -r "$INPUT_FILE" ]]; then
+		logtofile "ERREUR : Le fichier source n'existe pas ou n'est pas lisible : $INPUT_FILE"
+		exit 1
+	fi
+	# --------------------------
+	# Repertoire de destination:
+	# --------------------------
+	OUTPUT_DIR="${2:-/tmp/converted}"
+	# Extraire le nom du fichier sans son extension
+	FILENAME_BASE=$(basename -- "$INPUT_FILE")
+	FILENAME_BASE="${FILENAME_BASE%.*}"
+	# Créer le répertoire de sortie:
+	if ! mkdir -p -- "$OUTPUT_DIR"; then
+		logtofile "ERREUR : impossible de créer le répertoire de sortie."
+		exit 1
+	fi
+	if [[ ! -d "$OUTPUT_DIR" || ! -w "$OUTPUT_DIR" ]]; then
+		logtofile "ERREUR : Le répertoire de sortie n'est pas accessible en écriture : $OUTPUT_DIR"
+		exit 1
+	fi
+	OUTPUT_FILE="$OUTPUT_DIR/$FILENAME_BASE.mkv"
+	# Verfier l'espace de stockege:
+	if ! check_disk_space "$OUTPUT_DIR" 51200; then
     exit 1
-fi
+	fi
+	logtofile "Nom du fichier sans extension : \"$FILENAME_BASE\""
+	logtofile "Répertoire de sortie : \"$OUTPUT_DIR\""
+	logtofile "Fichier source : \"$INPUT_FILE\""
+	logtofile "Fichier de sortie : \"$OUTPUT_FILE\""
+	# --------------
+	# Configuration:
+	# --------------
+	ffmpeg="ffmpeg"
+	logtofile "Utilisation de $ffmpeg"
+	# Choix des fonctions de traitement
+	codec_video_function="Copy_video"
+	codec_audio_function="transcode_eac3"
+	codec_subtitle_function="copy_subtitle"
 
-logtofile "FFmpeg et FFprobe sont bien installés."
+}
+# -------------------------------------#
+# Check if there is enought dusk space :
+# -------------------------------------#
+check_disk_space()
+{
+    local output_dir="$1"
+    local required_mb="${2:-5120}"
+    local available_mb
 
-# Vérifier si un fichier vidéo a été fourni
-if [ -z "$1" ]; then
-    logtofile "Aucun fichier passé en argument."
-    logtofile "Usage : $0 <chemin_vers_le_fichier_video> [repertoire_de_sortie]"
-    exit 1
-fi
+    if [[ ! -d "$output_dir" ]]; then
+        logtofile "ERREUR : répertoire de sortie inexistant : $output_dir"
+        return 1
+    fi
 
-# Configuration
-ffmpeg="ffmpeg"
-logtofile "Utilisation de $ffmpeg"
+    if [[ ! "$required_mb" =~ ^[0-9]+$ ]]; then
+        logtofile "ERREUR : valeur minimale d'espace disque invalide."
+        return 1
+    fi
 
-# Choix des fonctions de traitement
-codec_video_function="Copy_video"
-codec_audio_function="transcode_eac3"
-codec_subtitle_function="copy_subtitle"
+    if ! available_mb=$(df -Pm "$output_dir" |
+        awk 'NR == 2 { print $4 }'); then
+        logtofile "ERREUR : impossible d'interroger l'espace disque."
+        return 1
+    fi
 
-INPUT_FILE="$1"
-OUTPUT_DIR="${2:-/tmp/converted}"
+    if [[ ! "$available_mb" =~ ^[0-9]+$ ]]; then
+        logtofile "ERREUR : impossible de déterminer l'espace disque disponible."
+        return 1
+    fi
 
-# Extraire le nom du fichier sans son extension
-FILENAME_BASE=$(basename -- "$INPUT_FILE")
-FILENAME_BASE="${FILENAME_BASE%.*}"
+    if (( available_mb < required_mb )); then
+        logtofile "ERREUR : espace disque insuffisant."
+        logtofile "Disponible : ${available_mb} Mo"
+        logtofile "Minimum requis : ${required_mb} Mo"
+        return 1
+    fi
 
-# Vérifier le fichier source
-if [ ! -f "$INPUT_FILE" ]; then
-    logtofile "ERREUR : le fichier source n'existe pas : $INPUT_FILE"
-    exit 1
-fi
-
-# Créer le répertoire de sortie
-if ! mkdir -p -- "$OUTPUT_DIR"; then
-    logtofile "ERREUR : impossible de créer le répertoire de sortie."
-    exit 1
-fi
-
-OUTPUT_FILE="$OUTPUT_DIR/$FILENAME_BASE.mkv"
-
-logtofile "Nom du fichier sans extension : \"$FILENAME_BASE\""
-logtofile "Répertoire de sortie : \"$OUTPUT_DIR\""
-logtofile "Fichier source : \"$INPUT_FILE\""
-logtofile "Fichier de sortie : \"$OUTPUT_FILE\""
-
-# -------------------------------------------------------------------
-# Déterminer si une piste audio utilise le codec E-AC3
-# -------------------------------------------------------------------
+    logtofile "Espace disque disponible : ${available_mb} Mo"
+    return 0
+}
+# -----------------------------------------------------
+# Déterminer si une piste audio utilise le codec E-AC3:
+# -----------------------------------------------------
 audio_is_eac3()
 {
     local track_number="$1"
     local video_file="$2"
     local codec
 
-    if [ -z "$track_number" ] || [ -z "$video_file" ]; then
-        logtofile "ERREUR : paramètres manquants dans audio_is_eac3."
+    if [[ -z "$track_number" || -z "$video_file" ]]; then
+        logtofile "ERREUR : paramètres manquants dans audio_is_eac3." >&2
         return 1
     fi
 
-    if [ ! -f "$video_file" ]; then
-        logtofile "ERREUR : fichier vidéo introuvable : $video_file"
+    if [[ ! -f "$video_file" ]]; then
+        logtofile "ERREUR : fichier vidéo introuvable : $video_file" >&2
         return 1
     fi
 
-    codec=$(ffprobe -v error \
-        -select_streams "a:$track_number" \
-        -show_entries stream=codec_name \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "$video_file" 2>/dev/null)
+    if ! codec=$(ffprobe -v error -select_streams "a:$track_number" -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 \
+						  "$video_file" 2>/dev/null); then
 
-    if [ "$codec" = "eac3" ]; then
+        logtofile "ERREUR : ffprobe a échoué pour la piste audio $track_number." >&2
+        return 1
+    fi
+
+    if [[ -z "$codec" ]]; then
+        logtofile "ERREUR : aucun codec détecté pour la piste audio $track_number." >&2
+        return 1
+    fi
+
+    if [[ "$codec" == "eac3" ]]; then
         echo "yes"
     else
         echo "no"
     fi
 }
-
-# -------------------------------------------------------------------
+# -----------------------------------------------
 # Transcoder les pistes E-AC3 en AAC stéréo
 # Copier les autres pistes audio sans transcodage
-# -------------------------------------------------------------------
+# -----------------------------------------------
 transcode_eac3()
 {
     logtofile "Fonction transcode_eac3 appelée."
@@ -110,11 +168,20 @@ transcode_eac3()
     local audio_tracks
     local i
     local codec_status
+    local audio_stream_indexes
 
-    audio_tracks=$(ffprobe -v error \
-        -show_entries stream=codec_type \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "$INPUT_FILE" 2>/dev/null | grep -c "audio")
+    # Sélectionner uniquement les flux audio et vérifier le succès de ffprobe.
+    if ! audio_stream_indexes=$(ffprobe -v error \
+        -select_streams a \
+        -show_entries stream=index \
+        -of csv=p=0 \
+        "$INPUT_FILE" 2>/dev/null); then
+
+        logtofile "ERREUR : impossible de détecter les pistes audio : $INPUT_FILE"
+        return 1
+    fi
+
+    audio_tracks=$(printf '%s\n' "$audio_stream_indexes" | awk 'NF { count++ } END { print count+0 }')
 
     if [ "$audio_tracks" -eq 0 ]; then
         logtofile "Aucune piste audio détectée dans '$INPUT_FILE'."
@@ -127,18 +194,18 @@ transcode_eac3()
     audio_map=()
     audio_cmd=()
 
-    for ((i=0; i<audio_tracks; i++)); do
+	for ((i=0; i<audio_tracks; i++)); do
+		audio_map+=(-map "0:a:$i")
 
-        audio_map+=(-map "0:a:$i")
+		if ! codec_status=$(audio_is_eac3 "$i" "$INPUT_FILE"); then
+			logtofile "ERREUR : détection impossible pour la piste audio $i."
+			return 1
+		fi
 
-        codec_status=$(audio_is_eac3 "$i" "$INPUT_FILE")
-
-        if [ "$codec_status" = "yes" ]; then
+        if [[ "$codec_status" == "yes" ]]; then
             logtofile "Piste audio $i : E-AC3 détecté, conversion en AAC stéréo."
 
-            audio_cmd+=(
-                "-c:a:$i" aac
-                "-b:a:$i" 128k
+            audio_cmd+=( "-c:a:$i" aac "-b:a:$i" 128k
                 "-ac:a:$i" 2
                 "-ar:a:$i" 48000
             )
@@ -151,21 +218,29 @@ transcode_eac3()
 
     logtofile "Nombre de pistes audio configurées : $audio_tracks"
 }
-
-# -------------------------------------------------------------------
-# Copier les pistes de sous-titres
-# -------------------------------------------------------------------
+# --------------------------------:
+# Copier les pistes de sous-titres:
+# --------------------------------:
 copy_subtitle()
 {
     logtofile "Fonction copy_subtitle appelée."
 
     local subtitle_tracks
     local i
+    local subtitle_stream_indexes
 
-    subtitle_tracks=$(ffprobe -v error \
-        -show_entries stream=codec_type \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "$INPUT_FILE" 2>/dev/null | grep -c "subtitle")
+    # Sélectionner uniquement les flux de sous-titres et vérifier ffprobe.
+    if ! subtitle_stream_indexes=$(ffprobe -v error \
+        -select_streams s \
+        -show_entries stream=index \
+        -of csv=p=0 \
+        "$INPUT_FILE" 2>/dev/null); then
+
+        logtofile "ERREUR : impossible de détecter les pistes de sous-titres : $INPUT_FILE"
+        return 1
+    fi
+
+    subtitle_tracks=$(printf '%s\n' "$subtitle_stream_indexes" | awk 'NF { count++ } END { print count+0 }')
 
     subtitle_map=()
     subtitle_cmd=()
@@ -182,10 +257,9 @@ copy_subtitle()
         subtitle_cmd+=("-c:s:$i" copy)
     done
 }
-
-# -------------------------------------------------------------------
-# Encoder la vidéo en HEVC avec redimensionnement et padding
-# -------------------------------------------------------------------
+# -----------------------------------------------------:
+# Encodage vidéo HEVC avec redimensionnement et padding:
+# -----------------------------------------------------:
 HEVC_plus_pad()
 {
     logtofile "Fonction HEVC_plus_pad appelée."
@@ -205,10 +279,9 @@ HEVC_plus_pad()
 
     logtofile "Paramètres vidéo HEVC configurés."
 }
-
-# -------------------------------------------------------------------
-# Copier la vidéo sans réencodage
-# -------------------------------------------------------------------
+# ---------------------------------#
+# Copier la vidéo sans ré-encodage #
+# ---------------------------------#
 Copy_video()
 {
     logtofile "Fonction Copy_video appelée."
@@ -219,9 +292,9 @@ Copy_video()
     logtofile "Vidéo configurée en copie directe."
 }
 
-# -------------------------------------------------------------------
-# Fonction principale d'encodage
-# -------------------------------------------------------------------
+# -------------------------------:
+# Fonction principale d'encodage :
+# -------------------------------:
 execute_ffmpeg()
 {
     logtofile "Fonction execute_ffmpeg appelée."
@@ -317,7 +390,10 @@ execute_ffmpeg()
 
     return "$exit_code"
 }
-
+# -------------#
+# LE PROGRAMME :
+# -------------#
+CONFIGURATION "$1" "$2"
+execute_ffmpeg # Executer ffmpeg 
 # Laisser le script retourner le résultat de FFmpeg
-execute_ffmpeg
 exit $?
